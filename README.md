@@ -32,7 +32,6 @@ DSH 桌面版（Electron 外壳 + 它管理的服务端进程）没有提供任�
 dsh plugin --profile desktop add github:kee0012/dsh-restart
 ```
 
-> `--profile` 换成你实际使用的 profile（`desktop` / `web`）。如需固定某个版本，可在仓库后追加 `#<tag>`（例如 `github:kee0012/dsh-restart#v0.1.1`）。
 > 安装后需要**重启 DSH**，新的服务端代码与 client bundle 才会生效。
 
 卸载：`dsh plugin --profile desktop remove dsh-restart`，然后重启 DSH。
