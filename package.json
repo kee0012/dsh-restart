@@ -1,0 +1,49 @@
+{
+  "name": "dsh-restart",
+  "version": "0.1.1",
+  "description": "Restart button for the DeepSeek Harness desktop title bar: one click relaunches the whole application, including the shell and its host process.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "bundle": "node scripts/build.mjs",
+    "gates": "node scripts/gates/run.mjs",
+    "check": "node scripts/build.mjs && node --check lib/index.js && node --check lib/client.js && node scripts/gates/run.mjs",
+    "test": "node test/host.test.mjs && node test/integration.test.mjs && node test/client.test.mjs && node test/helper-syntax.test.mjs",
+    "test:e2e": "node test/e2e/helper-selfdelete.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "restart",
+    "relaunch",
+    "title-bar",
+    "desktop"
+  ],
+  "license": "MIT"
+}
