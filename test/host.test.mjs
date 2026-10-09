@@ -3,6 +3,8 @@
  * Run with `node test/host.test.mjs`.
  */
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildPosixHelperScript,
   buildWindowsHelperScript,
@@ -162,17 +164,40 @@ test("the web helper terminates this process and replays its arguments", () => {
   assert.doesNotMatch(script, /an instance is already running/);
 });
 
-test("the WMI launcher hides the helper console through the STARTUPINFO", () => {
-  const command = buildWindowsLauncherCommand("C:\\Temp\\dsh-restart-helper.ps1");
-  // An Int32 ShowWindow makes Invoke-CimMethod fail with HRESULT 0x80041005, and
-  // the helper then comes back with a console flashing over the screen.
-  assert.match(command, /Win32_ProcessStartup -ClientOnly -Property @\{ ShowWindow = \[uint16\] 0 \}/);
-  assert.match(command, /ProcessStartupInformation = \$startup/);
-  // If the startup record cannot be built or used, the plain call still has to run.
-  assert.match(command, /if \(\$null -eq \$created\) \{ \$mode = 'visible'; \$created = Invoke-CimMethod/);
-  assert.match(command, /-File "C:\\Temp\\dsh-restart-helper\.ps1"/);
-  assert.match(command, /\$mode \+ '\|' \+ \$created\.ProcessId/);
-  assert.doesNotMatch(command, /\}; else \{/);
+test("the launcher hides the helper console and retries visibly", () => {
+  const hidden = buildWindowsLauncherCommand("C:\\Temp\\dsh-restart-helper.ps1");
+  // The console must not flash over the screen, and -WindowStyle is what carries
+  // that now: WMI returned a process id for a process whose script never ran, so
+  // the helper is started through the .NET process APIs instead.
+  assert.match(hidden, /Start-Process -FilePath 'powershell\.exe'/);
+  assert.match(hidden, /-ArgumentList \$argList/);
+  assert.match(hidden, /-WindowStyle Hidden/);
+  assert.match(hidden, /-PassThru/);
+  assert.match(hidden, /-File', \$file\)/);
+  assert.match(hidden, /\$file = 'C:\\Temp\\dsh-restart-helper\.ps1'/);
+  assert.match(hidden, /'hidden' \+ '\|' \+ \$proc\.Id/);
+  assert.doesNotMatch(hidden, /Invoke-CimMethod/);
+  assert.doesNotMatch(hidden, /Win32_ProcessStartup/);
+
+  // The visible retry is the same call with the other window state, and it says so.
+  const visible = buildWindowsLauncherCommand("C:\\Temp\\dsh-restart-helper.ps1", true);
+  assert.match(visible, /-WindowStyle Normal/);
+  assert.match(visible, /'visible' \+ '\|' \+ \$proc\.Id/);
+});
+
+test("a launch is only accepted once the helper reports for duty", () => {
+  // A process id is not liveness: the helper is trusted only after it rewrites
+  // its readiness marker as its first statement. This is what keeps a silent
+  // launch failure from killing the application with nothing left to bring it back.
+  const ready = join(tmpdir(), `dsh-restart-test-ready-${process.pid}`);
+  const script = buildWindowsHelperScript(desktopSpec, { helperReady: ready });
+  assert.ok(script.includes(`Set-Content -LiteralPath '${ready}'`), "the helper writes its readiness marker");
+  assert.match(script, /-Encoding ASCII/);
+  const lines = script.split("\n");
+  const markerLine = lines.findIndex((line) => line.includes("Set-Content -LiteralPath"));
+  const killLine = lines.findIndex((line) => line.includes("taskkill.exe"));
+  assert.ok(markerLine >= 0 && markerLine < killLine, "the marker must be written before anything is killed");
+  assert.doesNotMatch(script, /Invoke-CimMethod/);
 });
 
 test("the POSIX helper kills the target and restarts it detached", () => {

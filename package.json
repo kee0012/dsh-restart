@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "Restart button for the DeepSeek Harness desktop title bar: one click relaunches the whole application, including the shell and its host process.",
   "type": "module",
   "main": "lib/index.js",
@@ -23,7 +23,8 @@
     "gates": "node scripts/gates/run.mjs",
     "check": "node scripts/build.mjs && node --check lib/index.js && node --check lib/client.js && node scripts/gates/run.mjs",
     "test": "node test/host.test.mjs && node test/integration.test.mjs && node test/client.test.mjs && node test/helper-syntax.test.mjs",
-    "test:e2e": "node test/e2e/helper-selfdelete.mjs"
+    "test:e2e": "node test/e2e/helper-selfdelete.mjs",
+    "test:sim": "node scripts/sim-check.mjs"
   },
   "dsh": {
     "bundle": {

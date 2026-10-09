@@ -24,7 +24,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -76,6 +76,17 @@ const RETRY_DELAY_MS = 2500;
  * which looks exactly like a restart that did nothing.
  */
 const NODE_MODE_VARS = ["ELECTRON_RUN_AS_NODE", "DSH_DESKTOP_NODE_EXECUTABLE"];
+/**
+ * How long the host waits for the helper to prove it is running.
+ *
+ * The helper rewrites its readiness marker as its very first statement, so this
+ * only has to cover the launch of Windows PowerShell itself. When the wait runs
+ * out the host does *not* kill the application: losing the restart is annoying,
+ * losing the application with nothing left to bring it back is worse.
+ */
+const HELPER_READY_MS = 5000;
+/** Poll interval while waiting for the helper's readiness marker. */
+const HELPER_READY_POLL_MS = 50;
 /** The desktop window's own origin; the shell protocol proxy strips Origin, but browsers may not. */
 const DESKTOP_ORIGIN = "dsh-app://app";
 
@@ -276,9 +287,17 @@ export function buildWindowsHelperScript(spec, options = {}) {
     "function Write-Log([string] $message) { try { Add-Content -LiteralPath $log -Value ('[' + (Get-Date).ToString('o') + '] ' + $message) } catch { } }",
   );
   lines.push(`Write-Log ${quotePs(`helper started (${spec.mode}, target pid ${spec.pid})`)}`);
+  // Proof of life for the host: the marker is rewritten before anything is killed,
+  // so a helper that never got this far makes the host stand down instead of
+  // leaving the user with a closed application and nothing bringing it back.
+  if (options.helperReady) {
+    lines.push(
+      `try { Set-Content -LiteralPath ${quotePs(options.helperReady)} -Value (Get-Date).ToString('o') -Encoding ASCII } catch { }`,
+    );
+  }
   lines.push(...envLines(spec.env));
-  // The helper came from the WMI provider and may never have inherited these, but
-  // the application must not see them under any circumstances.
+  // The helper may never have inherited these, but the application must not see
+  // them under any circumstances.
   for (const key of NODE_MODE_VARS) {
     lines.push(`Remove-Item -LiteralPath ${quotePs(`Env:${key}`)} -ErrorAction SilentlyContinue`);
   }
@@ -295,6 +314,17 @@ export function buildWindowsHelperScript(spec, options = {}) {
     );
     lines.push(`  Write-Log ('refusing to terminate pid ${spec.pid}: ' + $target.ExecutablePath)`);
     lines.push("  exit 1");
+    lines.push("}");
+    // A process id is reused: if the old shell is gone and this id now belongs to
+    // some unrelated program, terminating its tree would hit an innocent app.
+    lines.push("if ($null -ne $target -and $target.CreationDate -ne $null) {");
+    lines.push("  $age = ((Get-Date) - $target.CreationDate).TotalSeconds");
+    lines.push("  if ($age -lt 60) {");
+    lines.push(
+      `    Write-Log ('refusing to terminate pid ${spec.pid}: it is only ' + [int]$age + 's old, so this is a reused process id');`,
+    );
+    lines.push("    exit 1");
+    lines.push("  }");
     lines.push("}");
     lines.push("Write-Log 'terminating the desktop shell process tree'");
   } else {
@@ -559,6 +589,20 @@ function execFileCapture(file, args, options) {
 }
 
 /**
+ * Marker the helper writes as its very first statement.
+ *
+ * The helper is started through WMI, and that provider lies: it regularly hands
+ * back a fresh process id for a process that never runs, or is gone again before
+ * its first statement. Reporting "restarting" and then killing the application
+ * on the strength of that number strands the user on the splash screen, so the
+ * number alone is never treated as proof that the helper is alive.
+ * @returns Absolute path of the liveness marker.
+ */
+function helperReadyPath() {
+  return join(tmpdir(), `${PLUGIN_ID}-helper-ready`);
+}
+
+/**
  * Write the helper next to the diagnostics log. A BOM keeps Windows PowerShell
  * from mis-reading non-ASCII characters in the embedded environment.
  * @param fileName - Helper file name.
@@ -572,66 +616,121 @@ function writeHelper(fileName, script) {
 }
 
 /**
- * Build the PowerShell that asks WMI to create the helper process.
+ * Quote a single shell word for PowerShell.
+ * @param value - Raw value.
+ * @returns The value wrapped in single quotes.
+ */
+function quotePsSingle(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+/**
+ * Build the PowerShell that starts the helper and reports its process id.
  *
- * WMI is what lifts the helper out of this process tree, and the console window
- * has to be suppressed through the STARTUPINFO because the provider creates it
- * before PowerShell can honour `-WindowStyle Hidden`. `ShowWindow` must be a
- * uint16: an Int32 fails with `HRESULT 0x80041005` and the helper would come back
- * with a console flashing over the screen. Both paths report which one ran.
+ * `Start-Process` goes through the .NET process APIs, the path that was measured
+ * to actually work here: the child honours the requested window state and runs
+ * its script. WMI `Win32_Process.Create` is deliberately *not* used, even though
+ * its `WmiPrvSE.exe` parent would also leave this process tree — in practice it
+ * hands back a process id for a process whose script never executes at all, and
+ * everything downstream of that id (the window saying DSH is restarting, killing
+ * the application) then strands the user on the splash screen with nothing left
+ * to bring the app back. The process id is only ever a hint anyway; the launch
+ * counts as real once the helper writes its own liveness marker.
  * @param helperPath - Helper script path.
+ * @param wantsVisible - Allow a visible console (the retry after a hidden try).
  * @returns A `-Command` payload that prints `<hidden|visible>|<pid>`.
  */
-export function buildWindowsLauncherCommand(helperPath) {
-  const commandLine = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${helperPath}"`;
-  const create = (extra) =>
-    `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${quotePs(commandLine)}${extra} }`;
+export function buildWindowsLauncherCommand(helperPath, wantsVisible = false) {
+  const windowStyle = wantsVisible ? "Normal" : "Hidden";
   return [
-    "$startup = $null",
-    "try { $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16] 0 } } catch { $startup = $null }",
-    "$created = $null",
-    `$mode = 'visible'`,
-    `if ($null -ne $startup) { try { $created = ${create("; ProcessStartupInformation = $startup")}; if ($null -ne $created) { $mode = 'hidden' } } catch { $created = $null } }`,
-    `if ($null -eq $created) { $mode = 'visible'; $created = ${create("")} }`,
-    "$mode + '|' + $created.ProcessId",
+    `$file = ${quotePsSingle(helperPath)}`,
+    "$argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $file)",
+    `$proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle ${windowStyle} -PassThru -ErrorAction Stop`,
+    `'${wantsVisible ? "visible" : "hidden"}' + '|' + $proc.Id`,
   ].join("; ");
 }
 
 /**
- * Create the helper through WMI so it outlives this process; fall back to a
- * detached spawn when WMI is unavailable.
+ * Wait until the freshly written helper proves it is running.
+ *
+ * A process id is not liveness — the helper can die before its first statement —
+ * so a launch only counts once the marker the helper writes upfront has been
+ * rewritten by this attempt.
+ * @param helperReady - Marker path.
+ * @param notBefore - Only a marker written after this instant counts.
+ * @param timeoutMs - How long to wait for the marker.
+ * @returns True once the helper reported for duty.
+ */
+async function waitForHelperReady(helperReady, notBefore, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      if (statSync(helperReady).mtimeMs >= notBefore) return true;
+    } catch {
+      // The helper has not written its marker yet.
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, HELPER_READY_POLL_MS));
+  }
+}
+
+/**
+ * Launch the helper and prove it is running before anything is killed.
+ * @param helperPath - Helper script path.
+ * @param helperReady - Marker path the helper writes first.
+ * @returns How it was started and its pid.
+ */
+async function launchWindowsHelper(helperPath, helperReady) {
+  let lastError = "";
+  const attempts = [
+    { mode: "hidden", via: "start-process-hidden" },
+    { mode: "visible", via: "start-process-visible" },
+  ];
+  for (const attempt of attempts) {
+    const notBefore = Date.now();
+    try {
+      const { stdout } = await execFileCapture(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", buildWindowsLauncherCommand(helperPath, attempt.mode === "visible")],
+        { encoding: "utf8", windowsHide: true, timeout: 20000 },
+      );
+      const created = /^(hidden|visible)\|(\d+)$/.exec(stdout.trim());
+      if (created === null) throw new Error(`the launcher reported no process id (${JSON.stringify(stdout.trim())})`);
+      const pid = Number.parseInt(created[2], 10);
+      if (await waitForHelperReady(helperReady, notBefore, HELPER_READY_MS)) {
+        if (attempt.mode === "visible") log("the helper needed a visible console (the hidden window state was rejected)");
+        return { via: attempt.via, pid };
+      }
+      lastError = `pid ${pid} never ran the helper`;
+      log(`the helper was handed a process id but never reported for duty (${lastError})`);
+    } catch (error) {
+      lastError = String(error && error.message ? error.message : error);
+      log(`starting the helper failed: ${lastError}`);
+    }
+  }
+  const child = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", helperPath],
+    { detached: true, stdio: "ignore", windowsHide: true },
+  );
+  child.unref();
+  if (typeof child.pid !== "number") throw new Error(`the restart helper could not be started (${lastError})`);
+  return { via: "detached-spawn", pid: child.pid };
+}
+
+/**
+ * Start the helper with a clean liveness marker in place.
  * @param helperPath - Helper script path.
  * @returns How it was started and its pid.
  */
 async function startWindowsHelper(helperPath) {
-  const psCommand = buildWindowsLauncherCommand(helperPath);
+  const helperReady = helperReadyPath();
   try {
-    const { stdout } = await execFileCapture(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", psCommand],
-      { encoding: "utf8", windowsHide: true, timeout: 20000 },
-    );
-    const text = stdout.trim();
-    const created = /^(hidden|visible)\|(\d+)$/.exec(text);
-    if (created !== null) {
-      const pid = Number.parseInt(created[2], 10);
-      if (created[1] === "visible") {
-        log("WMI created the helper with a visible console (the STARTUPINFO was rejected)");
-      }
-      return { via: created[1] === "hidden" ? "wmi-hidden" : "wmi-visible", pid };
-    }
-    throw new Error(`WMI returned no process id (${JSON.stringify(text)})`);
-  } catch (error) {
-    log(`WMI helper creation failed: ${String(error && error.message ? error.message : error)}`);
-    const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", helperPath],
-      { detached: true, stdio: "ignore", windowsHide: true },
-    );
-    child.unref();
-    if (typeof child.pid !== "number") throw new Error("the restart helper could not be started");
-    return { via: "detached-spawn", pid: child.pid };
+    rmSync(helperReady, { force: true });
+  } catch {
+    // A stale marker would make a dead helper look alive.
   }
+  return launchWindowsHelper(helperPath, helperReady);
 }
 
 /**
@@ -643,7 +742,7 @@ async function startWindowsHelper(helperPath) {
 async function launchHelper(mode, options = {}) {
   const spec = restartSpec(mode);
   if (platform() === "win32") {
-    const script = buildWindowsHelperScript(spec, { port: options.port });
+    const script = buildWindowsHelperScript(spec, { port: options.port, helperReady: helperReadyPath() });
     return startWindowsHelper(writeHelper(`${PLUGIN_ID}-helper.ps1`, script));
   }
   const helperPath = writeHelper(`${PLUGIN_ID}-helper.sh`, buildPosixHelperScript(spec));

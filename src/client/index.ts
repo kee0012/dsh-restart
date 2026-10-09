@@ -56,7 +56,11 @@ window.__ModuleLoader__.load({ id: "dsh-restart", factory: (require) => {
     }
 
     /**
-     * Restart glyph (circular arrow).
+     * Restart glyph: a heavy clockwise ring left open across the upper right,
+     * with a large solid head riding out of it on the end tangent. The weight and
+     * the exposed head are what keep the shape legible at 16px — a hairline ring
+     * with a chevron head read as a broken letter G, and the reference's radial
+     * speed lines turned into a fringe of pixels at this size, so they are gone.
      * @param props - `size` in pixels.
      * @returns Icon element.
      */
@@ -71,13 +75,15 @@ window.__ModuleLoader__.load({ id: "dsh-restart", factory: (require) => {
           height: size,
           fill: "none",
           stroke: "currentColor",
-          strokeWidth: 2,
-          strokeLinecap: "round",
-          strokeLinejoin: "round",
+          strokeWidth: 3.1,
+          strokeLinecap: "butt",
+          strokeLinejoin: "miter",
           "aria-hidden": "true",
         },
-        h("path", { d: "M20.5 12a8.5 8.5 0 1 1-2.49-6.01" }),
-        h("path", { d: "M20.5 3.5v6h-6" }),
+        // Ring: 264° of arc, from just below 3 o'clock clockwise round to the upper right.
+        h("path", { d: "M21 13.91 A9.2 9.2 0 1 1 12.96 2.85" }),
+        // Head: solid triangle thrown clear of the ring on the end tangent.
+        h("path", { d: "M16.94 3.27 L11.39 6.31 L12.14 -0.86Z", fill: "currentColor", stroke: "none" }),
       );
     }
 

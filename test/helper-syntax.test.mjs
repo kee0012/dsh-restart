@@ -1,6 +1,6 @@
 /**
  * Syntax-check the generated helper scripts with the very shells that run them:
- * the real PowerShell parser for the Windows helper (and for the WMI launcher
+ * the real PowerShell parser for the Windows helper (and for the launcher
  * payload), `sh -n` for the POSIX helper. A shell that is not installed skips
  * its own check, so the suite still runs on the other platform.
  *
@@ -116,11 +116,16 @@ if (process.platform === "win32") {
     checkPowerShell("dsh-restart-web-helper.ps1", buildWindowsHelperScript(webSpec), "web helper");
   });
 
-  test("the WMI launcher payload is valid PowerShell", () => {
+  test("the launcher payload is valid PowerShell", () => {
     checkPowerShell(
       "launcher.ps1",
       buildWindowsLauncherCommand("C:\\Temp\\dsh-restart-helper.ps1"),
       "launcher",
+    );
+    checkPowerShell(
+      "launcher-visible.ps1",
+      buildWindowsLauncherCommand("C:\\Temp\\dsh-restart-helper.ps1", true),
+      "visible launcher",
     );
   });
 } else {

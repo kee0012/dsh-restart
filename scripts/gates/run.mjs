@@ -91,7 +91,23 @@ gate("client registers the header fallback seat", client.includes('"conversation
 gate("client keeps the desktop-only guard", client.includes("data-windows-titlebar"));
 
 // 7. the restart path keeps its safety rails.
-gate("host hides the helper console", host.includes("ShowWindow = [uint16] 0"));
+// The helper must not flash a console over the screen: it is started hidden, and
+// only a hidden launch that never reports for duty is retried with a console.
+gate(
+  "host hides the helper console",
+  host.includes('wantsVisible ? "Normal" : "Hidden"') && host.includes("-WindowStyle ${windowStyle}"),
+  "the helper is started through Start-Process with a hidden window state",
+);
+gate(
+  "host requires the helper to prove it is alive",
+  host.includes("HELPER_READY_MS") && host.includes("-helper-ready") && host.includes("waitForHelperReady"),
+  "a process id is not liveness; the helper rewrites its marker before anything is killed",
+);
+gate(
+  "host never creates the helper through WMI",
+  !host.includes("Win32_ProcessStartup") && !host.includes("Invoke-CimMethod -ClassName Win32_Process"),
+  "WMI reported a pid for a process whose script never ran",
+);
 gate(
   "host filters the Node-mode variables",
   host.includes('const NODE_MODE_VARS = ["ELECTRON_RUN_AS_NODE", "DSH_DESKTOP_NODE_EXECUTABLE"]'),
